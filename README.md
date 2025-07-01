@@ -3,6 +3,7 @@ This directory contains a script and GitHub Action workflow to analyze PR commen
 ## Files
 - `scripts/pr_comment_analyzer.py` - The main analysis script
 - `README.md` - This documentation file
+
 **Note:** The script only requires the `requests` library, which is installed directly in the GitHub Action.
 ## GitHub Action Workflow
 The workflow is located at `.github/workflows/pr-comment-analysis.yml` and:
