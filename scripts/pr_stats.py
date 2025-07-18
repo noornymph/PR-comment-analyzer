@@ -223,8 +223,8 @@ def main():
         avg_comments = sum(activity_comment_counts) / len(activity_comment_counts)
         comment_stats = (
             f'• Mean comments: {avg_comments:.1f}\n'
-            f'• Min comments: {min(activity_comment_counts)}\n'
-            f'• Max comments: {max(activity_comment_counts)}'
+            f'• Max comments: {max(activity_comment_counts)}\n'
+            f'• Min comments: {min(activity_comment_counts)}'
         )
     else:
         comment_stats = '• No comments found on PRs'
