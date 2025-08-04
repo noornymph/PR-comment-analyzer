@@ -5,6 +5,7 @@ Usage:
 """
 import argparse
 import sys
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
@@ -149,7 +150,12 @@ def get_review_comment_count(owner, repo, pr_number, token):
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
-        return len(response.json())
+        comments = response.json()
+        return {
+            'pr_number': pr_number,
+            'comment_count': len(comments),
+            'comments': [comment.get('body', '') for comment in comments]
+        }
     except requests.exceptions.HTTPError as http_err:
         print(f'HTTP error occurred while fetching comments for PR #{pr_number}: {http_err}')
     except requests.exceptions.RequestException as req_err:
@@ -174,6 +180,21 @@ def get_command_line_args():
     return parser.parse_args()
 
 
+def write_results_to_file(repo, start_date, end_date, comments_data):
+    repo_file_name = repo.replace('/', '_')
+    output_file_name = f'{repo_file_name}-{start_date.date()}_{end_date.date()}.json'
+    comments_to_save = []
+
+    for pr_data in comments_data:
+        comments_to_save.append({
+            'pr_number': pr_data['pr_number'],
+            'comments': pr_data['comments']
+        })
+
+    with open(output_file_name, 'w', encoding='utf-8') as f:
+        json.dump(comments_to_save, f, indent=2)
+    print(f'\nSaved PR comments to {output_file_name}')
+
 def main():
     args = get_command_line_args()
     owner, repo = extract_repo_info(args.repo)
@@ -189,8 +210,6 @@ def main():
     if not pull_requests:
         print(f'No PRs found between {start_date.date()} and {end_date.date()}.')
         return
-    comment_counts = []
-    review_times = []
     
     with ThreadPoolExecutor(max_workers=10) as executor:
         comment_workers = [
@@ -201,9 +220,11 @@ def main():
             executor.submit(get_first_review_time, owner, repo, pr['number'], pr['created_at'], args.token)
             for pr in pull_requests
         ]
-        comment_counts.extend([worker.result() for worker in comment_workers])
-        review_times.extend([worker.result() for worker in review_time_workers])
-
+        comment_results = [worker.result() for worker in comment_workers]
+        review_times = [worker.result() for worker in review_time_workers]
+    
+    comment_counts = [result['comment_count'] for result in comment_results]
+    all_comments_data = [result for result in comment_results if result['comments']]
     prs_with_activity = []
     activity_comment_counts = []
     activity_review_times = []
@@ -236,6 +257,7 @@ def main():
     else:
         review_stats = '• Avg review time: No reviews found on any PRs'
     
+    write_results_to_file(repo, start_date, end_date, all_comments_data)
     print(
         f'PR Comment Stats for {start_date.date()} to {end_date.date()}:\n'
         f'• PRs with activity: {len(prs_with_activity)}\n'
