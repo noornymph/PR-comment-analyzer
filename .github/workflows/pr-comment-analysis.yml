@@ -1,4 +1,4 @@
-name: PR Comment Analysis
+name: Enhanced PR Comment Analysis
 on:
   schedule:
     # Run every month on the 1st at 2 AM UTC
@@ -21,34 +21,62 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install requests
-    - name: Run PR comment analysis and create results file
+    - name: Run enhanced PR comment analysis and create results file
       id: analysis
       run: |
         # Create the results file
-        echo "# PR Comment Analysis Report" > pr_comment_analysis_$(date +%Y-%m-%d).md
+        echo "# Enhanced PR Comment Analysis Report" > pr_comment_analysis_$(date +%Y-%m-%d).md
         echo "" >> pr_comment_analysis_$(date +%Y-%m-%d).md
         echo "**Analysis Date:** $(date)" >> pr_comment_analysis_$(date +%Y-%m-%d).md
         echo "**Repository:** ${{ github.repository }}" >> pr_comment_analysis_$(date +%Y-%m-%d).md
+        echo "**Features:** Enhanced metrics, AI-powered insights, comment export" >> pr_comment_analysis_$(date +%Y-%m-%d).md
         echo "" >> pr_comment_analysis_$(date +%Y-%m-%d).md
-        echo "## Results" >> pr_comment_analysis_$(date +%Y-%m-%d).md
+        echo "## Analysis Results" >> pr_comment_analysis_$(date +%Y-%m-%d).md
         echo '```' >> pr_comment_analysis_$(date +%Y-%m-%d).md
-        # Run the analysis and capture output
-        python scripts/pr_comment_analyzer.py \
-          --repo "https://github.com/${{ github.repository }}" \
-          --token "${{ secrets.GITHUB_TOKEN }}" >> pr_comment_analysis_$(date +%Y-%m-%d).md
+        # Run the enhanced analysis with optional Gemini integration and comment export
+        if [ -n "${{ secrets.GEMINI_API_KEY }}" ]; then
+          python scripts/pr_comment_analyzer.py \
+            --repo "https://github.com/${{ github.repository }}" \
+            --token "${{ secrets.GITHUB_TOKEN }}" \
+            --save-comments \
+            --gemini-key "${{ secrets.GEMINI_API_KEY }}" >> pr_comment_analysis_$(date +%Y-%m-%d).md
+        else
+          python scripts/pr_comment_analyzer.py \
+            --repo "https://github.com/${{ github.repository }}" \
+            --token "${{ secrets.GITHUB_TOKEN }}" \
+            --save-comments >> pr_comment_analysis_$(date +%Y-%m-%d).md
+        fi
         echo '```' >> pr_comment_analysis_$(date +%Y-%m-%d).md
     - name: Upload results as artifact
       uses: actions/upload-artifact@v4
       with:
         name: pr-comment-analysis-${{ github.run_number }}
-        path: pr_comment_analysis_*.md
+        path: |
+          pr_comment_analysis_*.md
+          pr_comments_*.json
         retention-days: 365
     - name: Create summary
       run: |
-        echo "## PR Comment Analysis Summary" >> $GITHUB_STEP_SUMMARY
+        echo "## Enhanced PR Comment Analysis Summary" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "Analysis completed for repository: **${{ github.repository }}**" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo ":bar_chart: **Results saved as artifact:** pr-comment-analysis-${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+        echo ":bar_chart: **Features:** Enhanced code metrics, AI-powered issue classification, observability insights" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        if [ -n "${{ secrets.GEMINI_API_KEY }}" ]; then
+          echo ":robot: **AI Analysis:** Enabled with Gemini API" >> $GITHUB_STEP_SUMMARY
+        else
+          echo ":robot: **AI Analysis:** Disabled (no API key configured)" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo ":floppy_disk: **Data Export:** Comments exported to JSON file" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo ":package: **Artifacts:** pr-comment-analysis-${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo ":date: **Next scheduled run:** 30 days from now" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Setup Instructions" >> $GITHUB_STEP_SUMMARY
+        echo "To enable AI-powered analysis, add your Gemini API key as a repository secret:" >> $GITHUB_STEP_SUMMARY
+        echo "1. Go to Settings → Secrets and variables → Actions" >> $GITHUB_STEP_SUMMARY
+        echo "2. Add new secret: \`GEMINI_API_KEY\`" >> $GITHUB_STEP_SUMMARY
+        echo "3. Get your API key from [Google AI Studio](https://aistudio.google.com/)" >> $GITHUB_STEP_SUMMARY
