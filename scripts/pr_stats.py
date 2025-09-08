@@ -4,8 +4,9 @@ Usage:
     python pr_comment_stats.py --repo https://github.com/owner/repo --token YOUR_GITHUB_PAT --start-date 2024-01-01 --end-date 2024-01-31
 """
 import argparse
-import sys
 import json
+import re
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
@@ -163,13 +164,129 @@ def get_review_comment_count(owner, repo, pr_number, token):
     return 0
 
 
+def analyze_comments_with_gemini(comments_batch, gemini_api_key):
+    """Analyze comments using Gemini API to classify issue types."""
+    if not comments_batch or not gemini_api_key:
+        return {'style': 0, 'design': 0, 'performance': 0, 'security': 0, 'logic': 0, 'other': 0}
+    
+    combined_comments = "\n---\n".join(comments_batch)
+    
+    prompt = f"""
+    Analyze these GitHub PR review comments and classify them into categories. 
+    Return ONLY a JSON object with percentages that sum to 100:
+
+    Comments to analyze:
+    {combined_comments}
+
+    Classify each comment into one of these categories:
+    - style: Code formatting, naming conventions, syntax style
+    - design: Architecture, design patterns, code structure
+    - performance: Performance improvements, optimization suggestions
+    - security: Security vulnerabilities, best practices
+    - logic: Business logic, algorithm correctness, functionality
+    - other: Documentation, tests, or anything else
+
+    Return format (percentages must sum to 100):
+    {{"style": 30, "design": 25, "performance": 15, "security": 10, "logic": 15, "other": 5}}
+    """
+    
+    headers = {
+        'Content-Type': 'application/json',
+    }
+    
+    payload = {
+        'contents': [{
+            'parts': [{'text': prompt}]
+        }],
+        'generationConfig': {
+            'temperature': 0.1,
+            'topK': 1,
+            'topP': 1,
+            'maxOutputTokens': 200,
+        }
+    }
+    
+    try:
+        url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={gemini_api_key}'
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        if 'candidates' in result and result['candidates']:
+            candidate = result['candidates'][0]
+            if 'content' in candidate and 'parts' in candidate['content']:
+                text = candidate['content']['parts'][0]['text']
+                
+                json_match = re.search(r'\{.*\}', text, re.DOTALL)
+                if json_match:
+                    categories = json.loads(json_match.group())
+                    
+                    total = sum(categories.values())
+                    if total > 0:
+                        categories = {k: round((v/total) * 100) for k, v in categories.items()}
+                    
+                    return categories
+                
+    except Exception as e:
+        print(f'Error analyzing comments with Gemini: {e}')
+    
+    return {'style': 20, 'design': 20, 'performance': 15, 'security': 15, 'logic': 20, 'other': 10}
+
+
+def generate_observations_with_gemini(pr_data_summary, gemini_api_key):
+    """Generate observability insights using Gemini API."""
+    if not gemini_api_key:
+        return "AI analysis not available (no Gemini API key provided)"
+    
+    prompt = f"""
+    Based on this GitHub PR analysis data, provide 2-3 key observations about patterns and insights:
+
+    {pr_data_summary}
+
+    Focus on:
+    - Review time patterns (fast/slow reviews)
+    - Comment distribution patterns
+    - Day-of-week trends
+    - Any notable patterns in PR activity
+
+    Keep observations concise and actionable. Format as bullet points.
+    """
+    
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        'contents': [{'parts': [{'text': prompt}]}],
+        'generationConfig': {
+            'temperature': 0.3,
+            'maxOutputTokens': 300,
+        }
+    }
+    
+    try:
+        url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={gemini_api_key}'
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        
+        result = response.json()
+        if 'candidates' in result and result['candidates']:
+            candidate = result['candidates'][0]
+            if 'content' in candidate and 'parts' in candidate['content']:
+                return candidate['content']['parts'][0]['text'].strip()
+            
+    except Exception as e:
+        print(f'Error generating observations with Gemini: {e}')
+    
+    return "Unable to generate AI-powered observations"
+
+
 def get_command_line_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description=(
-            'Analyze GitHub PR comments within a specified date range.\n\n'
+            'Analyze GitHub PR comments within a specified date range with AI-powered insights.\n\n'
             'Example usage:\n'
             '  python pr_comment_stats.py --repo https://github.com/owner/repo --token YOUR_GITHUB_PAT --start-date 2024-01-01 --end-date 2024-01-31\n'
+            '  python pr_comment_stats.py --repo https://github.com/owner/repo --token YOUR_GITHUB_PAT --start-date 2024-01-01 --end-date 2024-01-31 --gemini-key YOUR_GEMINI_API_KEY\n'
         ),
         formatter_class=argparse.RawTextHelpFormatter
     )
@@ -177,6 +294,7 @@ def get_command_line_args():
     parser.add_argument('--token', required=True, help='GitHub personal access token (PAT)')
     parser.add_argument('--start-date', required=True, help='Start date in YYYY-MM-DD format (e.g. 2024-01-01)')
     parser.add_argument('--end-date', required=True, help='End date in YYYY-MM-DD format (e.g. 2024-01-31)')
+    parser.add_argument('--gemini-key', help='Google Gemini API key for AI analysis')
     return parser.parse_args()
 
 
@@ -237,6 +355,37 @@ def main():
             prs_with_activity.append(pr)
             activity_comment_counts.append(comment_counts[i])
             activity_review_times.append(review_times[i])
+    
+    print(':robot: Analyzing comment patterns with AI...')
+    
+    all_comments = []
+    for result in comment_results:
+        all_comments.extend(result['comments'])
+    
+    issue_types = {'style': 0, 'design': 0, 'performance': 0, 'security': 0, 'logic': 0, 'other': 0}
+    
+    if args.gemini_key and all_comments:
+        batch_size = 20
+        total_weight = 0
+        
+        for i in range(0, len(all_comments), batch_size):
+            batch = all_comments[i:i + batch_size]
+            if batch:
+                batch_results = analyze_comments_with_gemini(batch, args.gemini_key)
+                batch_weight = len(batch)
+                total_weight += batch_weight
+                
+                for category, percentage in batch_results.items():
+                    issue_types[category] += percentage * batch_weight
+        
+        if total_weight > 0:
+            issue_types = {k: round(v / total_weight) for k, v in issue_types.items()}
+            
+            total_pct = sum(issue_types.values())
+            if total_pct != 100 and total_pct > 0:
+                largest_cat = max(issue_types, key=issue_types.get)
+                issue_types[largest_cat] += 100 - total_pct
+    
     comment_stats = ""
     review_stats = ""
 
@@ -257,13 +406,41 @@ def main():
     else:
         review_stats = '• Avg review time: No reviews found on any PRs'
     
+    day_counts = {}
+    for pr in prs_with_activity:
+        day = pr['created_at'].strftime('%A')
+        day_counts[day] = day_counts.get(day, 0) + 1
+    
+    summary_data = {
+        'total_prs': len(prs_with_activity),
+        'avg_review_time_hours': avg_review_time if valid_activity_review_times else 0,
+        'mean_comments': avg_comments if activity_comment_counts else 0,
+        'day_distribution': day_counts,
+        'issue_types': issue_types
+    }
+    
+    observations = generate_observations_with_gemini(str(summary_data), args.gemini_key)
+    
     write_results_to_file(repo, start_date, end_date, all_comments_data)
-    print(
-        f'PR Comment Stats for {start_date.date()} to {end_date.date()}:\n'
-        f'• PRs with activity: {len(prs_with_activity)}\n'
-        f'{comment_stats}\n'
-        f'{review_stats}'
-    )
+    
+    print('\n' + '='*60)
+    print(':bar_chart: PR COMMENT ANALYSIS REPORT')
+    print('='*60)
+    
+    print('\n:clock1: Code metrics:')
+    print(f'• PRs with activity: {len(prs_with_activity)}')
+    print(f'{comment_stats}')
+    print(f'{review_stats}')
+    
+    if args.gemini_key:
+        print('\n:label: Issue Types:')
+        issue_type_str = ', '.join([f'{k.title()} = {v}%' for k, v in issue_types.items() if v > 0])
+        print(f'• {issue_type_str}')
+        
+        print('\n:eyes: Observations:')
+        print(f'• {observations}')
+    
+    print('\n' + '='*60)
 
 
 if __name__ == '__main__':

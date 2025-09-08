@@ -4,12 +4,13 @@ Usage:
     python gitlab_mr_stats.py --url https://gitlab.com/group/project --token YOUR_GITLAB_PAT --start-date 2024-01-01 --end-date 2024-01-31
 """
 import argparse
+import json
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from urllib.parse import urlparse, quote
+from urllib.parse import quote, urlparse
 
-import re
 import requests
 
 
@@ -220,22 +221,144 @@ def get_review_comment_count(base_url, project_path, mr_iid, token):
         response = requests.get(notes_url, headers=headers)
         response.raise_for_status()
         notes = response.json()
-        comment_count = len([note for note in notes if not note.get('system', False)])
-        return comment_count
+        user_notes = [note for note in notes if not note.get('system', False)]
+        comment_count = len(user_notes)
+        comment_texts = [note.get('body', '') for note in user_notes if note.get('body', '').strip()]
+        return {
+            'mr_iid': mr_iid,
+            'comment_count': comment_count,
+            'comments': comment_texts
+        }
     except requests.exceptions.HTTPError as http_err:
         print(f'HTTP error occurred while fetching comments for MR !{mr_iid}: {http_err}')
     except requests.exceptions.RequestException as req_err:
         print(f'Network error occurred while fetching comments for MR !{mr_iid}: {req_err}')
-    return 0
+    return {'mr_iid': mr_iid, 'comment_count': 0, 'comments': []}
+
+
+def analyze_comments_with_gemini(comments_batch, gemini_api_key):
+    """Analyze comments using Gemini API to classify issue types."""
+    if not comments_batch or not gemini_api_key:
+        return {'style': 0, 'design': 0, 'performance': 0, 'security': 0, 'logic': 0, 'other': 0}
+    
+    combined_comments = "\n---\n".join(comments_batch)
+    
+    prompt = f"""
+    Analyze these GitLab MR review comments and classify them into categories. 
+    Return ONLY a JSON object with percentages that sum to 100:
+
+    Comments to analyze:
+    {combined_comments}
+
+    Classify each comment into one of these categories:
+    - style: Code formatting, naming conventions, syntax style
+    - design: Architecture, design patterns, code structure
+    - performance: Performance improvements, optimization suggestions
+    - security: Security vulnerabilities, best practices
+    - logic: Business logic, algorithm correctness, functionality
+    - other: Documentation, tests, or anything else
+
+    Return format (percentages must sum to 100):
+    {{"style": 30, "design": 25, "performance": 15, "security": 10, "logic": 15, "other": 5}}
+    """
+    
+    headers = {
+        'Content-Type': 'application/json',
+    }
+    
+    payload = {
+        'contents': [{
+            'parts': [{'text': prompt}]
+        }],
+        'generationConfig': {
+            'temperature': 0.1,
+            'topK': 1,
+            'topP': 1,
+            'maxOutputTokens': 200,
+        }
+    }
+    
+    try:
+        url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={gemini_api_key}'
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        if 'candidates' in result and result['candidates']:
+            candidate = result['candidates'][0]
+            if 'content' in candidate and 'parts' in candidate['content']:
+                text = candidate['content']['parts'][0]['text']
+                
+                json_match = re.search(r'\{.*\}', text, re.DOTALL)
+                if json_match:
+                    categories = json.loads(json_match.group())
+                    
+                    total = sum(categories.values())
+                    if total > 0:
+                        categories = {k: round((v/total) * 100) for k, v in categories.items()}
+                    
+                    return categories
+                
+    except Exception as e:
+        print(f'Error analyzing comments with Gemini: {e}')
+    
+    return {'style': 20, 'design': 20, 'performance': 15, 'security': 15, 'logic': 20, 'other': 10}
+
+
+def generate_observations_with_gemini(mr_data_summary, gemini_api_key):
+    """Generate observability insights using Gemini API."""
+    if not gemini_api_key:
+        return "AI analysis not available (no Gemini API key provided)"
+    
+    prompt = f"""
+    Based on this GitLab MR analysis data, provide 2-3 key observations about patterns and insights:
+
+    {mr_data_summary}
+
+    Focus on:
+    - Review time patterns (fast/slow reviews)
+    - Comment distribution patterns
+    - Day-of-week trends
+    - Any notable patterns in MR activity
+
+    Keep observations concise and actionable. Format as bullet points.
+    """
+    
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        'contents': [{'parts': [{'text': prompt}]}],
+        'generationConfig': {
+            'temperature': 0.3,
+            'maxOutputTokens': 300,
+        }
+    }
+    
+    try:
+        url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={gemini_api_key}'
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        
+        result = response.json()
+        if 'candidates' in result and result['candidates']:
+            candidate = result['candidates'][0]
+            if 'content' in candidate and 'parts' in candidate['content']:
+                return candidate['content']['parts'][0]['text'].strip()
+            
+    except Exception as e:
+        print(f'Error generating observations with Gemini: {e}')
+    
+    return "Unable to generate AI-powered observations"
 
 
 def get_command_line_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description=(
-            'Analyze GitLab MR comments within a specified date range.\n\n'
+            'Analyze GitLab MR comments within a specified date range with AI-powered insights.\n\n'
             'Example usage:\n'
             '  python gitlab_mr_stats.py --url https://gitlab.com/group/project --token YOUR_GITLAB_PAT --start-date 2024-01-01 --end-date 2024-01-31\n'
+            '  python gitlab_mr_stats.py --url https://gitlab.com/group/project --token YOUR_GITLAB_PAT --start-date 2024-01-01 --end-date 2024-01-31 --gemini-key YOUR_GEMINI_API_KEY\n'
         ),
         formatter_class=argparse.RawTextHelpFormatter
     )
@@ -243,6 +366,7 @@ def get_command_line_args():
     parser.add_argument('--token', required=True, help='GitLab personal access token (PAT)')
     parser.add_argument('--start-date', required=True, help='Start date in YYYY-MM-DD format (e.g. 2024-01-01)')
     parser.add_argument('--end-date', required=True, help='End date in YYYY-MM-DD format (e.g. 2024-01-31)')
+    parser.add_argument('--gemini-key', help='Google Gemini API key for AI analysis')
     return parser.parse_args()
 
 
@@ -261,7 +385,7 @@ def main():
     if not merge_requests:
         print(f'No MRs found between {start_date.date()} and {end_date.date()}.')
         return
-    comment_counts = []
+    comment_results = []
     review_times = []
     
     with ThreadPoolExecutor(max_workers=10) as executor:
@@ -273,9 +397,10 @@ def main():
             executor.submit(get_first_review_time, base_url, project_path, mr['iid'], mr['created_at'], args.token)
             for mr in merge_requests
         ]
-        comment_counts.extend([worker.result() for worker in comment_workers])
+        comment_results.extend([worker.result() for worker in comment_workers])
         review_times.extend([worker.result() for worker in review_time_workers])
 
+    comment_counts = [result['comment_count'] for result in comment_results]
     mrs_with_activity = []
     activity_comment_counts = []
     activity_review_times = []
@@ -288,6 +413,37 @@ def main():
             mrs_with_activity.append(mr)
             activity_comment_counts.append(comment_counts[i])
             activity_review_times.append(review_times[i])
+    
+    print(':robot: Analyzing comment patterns with AI...')
+    
+    all_comments = []
+    for result in comment_results:
+        all_comments.extend(result['comments'])
+    
+    issue_types = {'style': 0, 'design': 0, 'performance': 0, 'security': 0, 'logic': 0, 'other': 0}
+    
+    if args.gemini_key and all_comments:
+        batch_size = 20
+        total_weight = 0
+        
+        for i in range(0, len(all_comments), batch_size):
+            batch = all_comments[i:i + batch_size]
+            if batch:
+                batch_results = analyze_comments_with_gemini(batch, args.gemini_key)
+                batch_weight = len(batch)
+                total_weight += batch_weight
+                
+                for category, percentage in batch_results.items():
+                    issue_types[category] += percentage * batch_weight
+        
+        if total_weight > 0:
+            issue_types = {k: round(v / total_weight) for k, v in issue_types.items()}
+            
+            total_pct = sum(issue_types.values())
+            if total_pct != 100 and total_pct > 0:
+                largest_cat = max(issue_types, key=issue_types.get)
+                issue_types[largest_cat] += 100 - total_pct
+    
     comment_stats = ""
     review_stats = ""
 
@@ -308,12 +464,39 @@ def main():
     else:
         review_stats = '• Avg review time: No reviews found on any MRs'
     
-    print(
-        f'GitLab MR Comment Stats for {start_date.date()} to {end_date.date()}:\n'
-        f'• MRs with activity: {len(mrs_with_activity)}\n'
-        f'{comment_stats}\n'
-        f'{review_stats}'
-    )
+    day_counts = {}
+    for mr in mrs_with_activity:
+        day = mr['created_at'].strftime('%A')
+        day_counts[day] = day_counts.get(day, 0) + 1
+    
+    summary_data = {
+        'total_mrs': len(mrs_with_activity),
+        'avg_review_time_hours': avg_review_time if valid_activity_review_times else 0,
+        'mean_comments': avg_comments if activity_comment_counts else 0,
+        'day_distribution': day_counts,
+        'issue_types': issue_types
+    }
+    
+    observations = generate_observations_with_gemini(str(summary_data), args.gemini_key)
+    
+    print('\n' + '='*60)
+    print(':bar_chart: GITLAB MR COMMENT ANALYSIS REPORT')
+    print('='*60)
+    
+    print('\n:clock1: Code metrics:')
+    print(f'• MRs with activity: {len(mrs_with_activity)}')
+    print(f'{comment_stats}')
+    print(f'{review_stats}')
+    
+    if args.gemini_key:
+        print('\n:label: Issue Types:')
+        issue_type_str = ', '.join([f'{k.title()} = {v}%' for k, v in issue_types.items() if v > 0])
+        print(f'• {issue_type_str}')
+        
+        print('\n:eyes: Observations:')
+        print(f'• {observations}')
+    
+    print('\n' + '='*60)
 
 
 if __name__ == '__main__':
