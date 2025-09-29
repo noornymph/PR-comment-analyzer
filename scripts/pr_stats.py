@@ -1,7 +1,7 @@
 """
 Script to analyze GitHub PR comments within a specified date range.
 Usage:
-    python pr_comment_stats.py --repo https://github.com/owner/repo --token YOUR_GITHUB_PAT --start-date 2024-01-01 --end-date 2024-01-31
+    python pr_comment_stats.py --repo https://github.com/owner/repo --token YOUR_GITHUB_PAT --gemini_api_key GEMINI_API_KEY --start-date 2024-01-01 --end-date 2024-01-31
 """
 import argparse
 import sys
@@ -11,6 +11,8 @@ from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 import requests
+from google import genai
+from google.genai.errors import ClientError
 
 
 def calculate_business_hours(start_time, end_time):
@@ -169,7 +171,7 @@ def get_command_line_args():
         description=(
             'Analyze GitHub PR comments within a specified date range.\n\n'
             'Example usage:\n'
-            '  python pr_comment_stats.py --repo https://github.com/owner/repo --token YOUR_GITHUB_PAT --start-date 2024-01-01 --end-date 2024-01-31\n'
+            '  python pr_comment_stats.py --repo https://github.com/owner/repo --token YOUR_GITHUB_PAT --gemini-api-key GEMINI_API_KEY --start-date 2024-01-01 --end-date 2024-01-31\n'
         ),
         formatter_class=argparse.RawTextHelpFormatter
     )
@@ -177,7 +179,35 @@ def get_command_line_args():
     parser.add_argument('--token', required=True, help='GitHub personal access token (PAT)')
     parser.add_argument('--start-date', required=True, help='Start date in YYYY-MM-DD format (e.g. 2024-01-01)')
     parser.add_argument('--end-date', required=True, help='End date in YYYY-MM-DD format (e.g. 2024-01-31)')
+    parser.add_argument('--gemini-api-key', required=True,
+                        help='Gemini API key (e.g. https://aistudio.google.com/api-keys)')
     return parser.parse_args()
+
+
+def generate_ai_insights_on_comments_data(api_key, comments_data):
+    """Generate AI Insights data from comments data."""
+    prompt = (
+        'Generate four one-line insights about code-review comments.\n'
+        'STRICT OUTPUT (exactly 4 lines, • bullets, no extra text):\n'
+        '1) Observations: <≤20 words> i.e Summarize patterns (e.g., “High style violations in new module,” “Long waits for PRs on Fridays”).\n'
+        '2) Action Taken: <≤20 words; if unknown, write \'No clear signal\'> i.e We introduced a pre-commit hook for linting, reducing style issues by 15% in last 2 weeks.\n'
+        '3) Next Steps: <≤20 words; concrete/measurable> i.e We’ll set a 24-hour review SLA,” “We’ll do a code review knowledge-sharing session next sprint.\n'
+        '4) Additional Comments: <≤20 words; links/holidays/unusual context or \'None\'> Link or attach a short table with PR data, any unusual circumstances (holidays, new hires, etc.).\n'
+        'Rules: Be concise, specific, and do not hallucinate. Base only on provided data.\n'
+    )
+
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[prompt, comments_data],
+        )
+
+        return (response.text or '').strip()
+    except ValueError:
+        print('Could not generate insights for comments data.')
+    except ClientError:
+        print('API key not valid. Please pass a valid API key')
 
 
 def write_results_to_file(repo, start_date, end_date, comments_data):
@@ -201,6 +231,8 @@ def main():
 
     start_date = parse_date(args.start_date)
     end_date = parse_date(args.end_date)
+
+    gemini_api_key = args.gemini_api_key
 
     if start_date > end_date:
         print('Error: Start date must be before or equal to end date.')
@@ -256,14 +288,22 @@ def main():
         review_stats = f'• Avg review time: {avg_review_time:.1f} business hours (excluding weekends)'
     else:
         review_stats = '• Avg review time: No reviews found on any PRs'
-    
+
+    ai_insights = generate_ai_insights_on_comments_data(gemini_api_key, str(all_comments_data))
+
     write_results_to_file(repo, start_date, end_date, all_comments_data)
     print(
         f'PR Comment Stats for {start_date.date()} to {end_date.date()}:\n'
         f'• PRs with activity: {len(prs_with_activity)}\n'
         f'{comment_stats}\n'
-        f'{review_stats}'
+        f'{review_stats}\n'
     )
+
+    if ai_insights:
+        print(
+            f'PR Comment Insights for {start_date.date()} to {end_date.date()}:\n'
+            f'{ai_insights}'
+        )
 
 
 if __name__ == '__main__':
