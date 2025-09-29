@@ -4,8 +4,8 @@ Usage:
     python pr_comment_stats.py --repo https://github.com/owner/repo --token YOUR_GITHUB_PAT --gemini_api_key GEMINI_API_KEY --start-date 2024-01-01 --end-date 2024-01-31
 """
 import argparse
-import sys
 import json
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
@@ -22,7 +22,7 @@ def calculate_business_hours(start_time, end_time):
         return 0
     total_hours = 0
     current = start_time
-    
+
     while current.date() < end_time.date():
 
         if current.weekday() < 5:
@@ -110,28 +110,28 @@ def get_first_review_time(owner, repo, pr_number, pr_created_at, token):
     comments_url = f'https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments'
     reviews_url = f'https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/reviews'
     earliest_review_time = None
-    
+
     try:
         response = requests.get(comments_url, headers=headers)
         response.raise_for_status()
         comments = response.json()
-        
+
         if comments:
             first_comment_time = datetime.strptime(comments[0]['created_at'], '%Y-%m-%dT%H:%M:%SZ')
             earliest_review_time = first_comment_time
         response = requests.get(reviews_url, headers=headers)
         response.raise_for_status()
         reviews = response.json()
-        
+
         if reviews:
             first_review_time = datetime.strptime(reviews[0]['submitted_at'], '%Y-%m-%dT%H:%M:%SZ')
 
             if earliest_review_time is None or first_review_time < earliest_review_time:
                 earliest_review_time = first_review_time
-        
+
         if earliest_review_time:
             business_hours = calculate_business_hours(pr_created_at, earliest_review_time)
-            return business_hours 
+            return business_hours
     except requests.exceptions.HTTPError as http_err:
         print(f'HTTP error while fetching review time for PR #{pr_number}: {http_err}')
     except requests.exceptions.RequestException as req_err:
@@ -225,6 +225,7 @@ def write_results_to_file(repo, start_date, end_date, comments_data):
         json.dump(comments_to_save, f, indent=2)
     print(f'\nSaved PR comments to {output_file_name}')
 
+
 def main():
     args = get_command_line_args()
     owner, repo = extract_repo_info(args.repo)
@@ -242,7 +243,7 @@ def main():
     if not pull_requests:
         print(f'No PRs found between {start_date.date()} and {end_date.date()}.')
         return
-    
+
     with ThreadPoolExecutor(max_workers=10) as executor:
         comment_workers = [
             executor.submit(get_review_comment_count, owner, repo, pr['number'], args.token)
@@ -254,7 +255,7 @@ def main():
         ]
         comment_results = [worker.result() for worker in comment_workers]
         review_times = [worker.result() for worker in review_time_workers]
-    
+
     comment_counts = [result['comment_count'] for result in comment_results]
     all_comments_data = [result for result in comment_results if result['comments']]
     prs_with_activity = []
@@ -264,13 +265,11 @@ def main():
     for i, pr in enumerate(pull_requests):
         has_comments = comment_counts[i] > 0
         has_reviews = review_times[i] is not None
-        
+
         if has_comments or has_reviews:
             prs_with_activity.append(pr)
             activity_comment_counts.append(comment_counts[i])
             activity_review_times.append(review_times[i])
-    comment_stats = ""
-    review_stats = ""
 
     if activity_comment_counts:
         avg_comments = sum(activity_comment_counts) / len(activity_comment_counts)
