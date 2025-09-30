@@ -1,16 +1,18 @@
 """
 Script to analyze GitHub PR comments within a specified date range.
 Usage:
-    python pr_comment_stats.py --repo https://github.com/owner/repo --token YOUR_GITHUB_PAT --start-date 2024-01-01 --end-date 2024-01-31
+    python pr_comment_stats.py --repo https://github.com/owner/repo --token YOUR_GITHUB_PAT --gemini_api_key GEMINI_API_KEY --start-date 2024-01-01 --end-date 2024-01-31
 """
 import argparse
-import sys
 import json
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 import requests
+from google import genai
+from google.genai.errors import ClientError
 
 
 def calculate_business_hours(start_time, end_time):
@@ -20,7 +22,7 @@ def calculate_business_hours(start_time, end_time):
         return 0
     total_hours = 0
     current = start_time
-    
+
     while current.date() < end_time.date():
 
         if current.weekday() < 5:
@@ -108,28 +110,28 @@ def get_first_review_time(owner, repo, pr_number, pr_created_at, token):
     comments_url = f'https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments'
     reviews_url = f'https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/reviews'
     earliest_review_time = None
-    
+
     try:
         response = requests.get(comments_url, headers=headers)
         response.raise_for_status()
         comments = response.json()
-        
+
         if comments:
             first_comment_time = datetime.strptime(comments[0]['created_at'], '%Y-%m-%dT%H:%M:%SZ')
             earliest_review_time = first_comment_time
         response = requests.get(reviews_url, headers=headers)
         response.raise_for_status()
         reviews = response.json()
-        
+
         if reviews:
             first_review_time = datetime.strptime(reviews[0]['submitted_at'], '%Y-%m-%dT%H:%M:%SZ')
 
             if earliest_review_time is None or first_review_time < earliest_review_time:
                 earliest_review_time = first_review_time
-        
+
         if earliest_review_time:
             business_hours = calculate_business_hours(pr_created_at, earliest_review_time)
-            return business_hours 
+            return business_hours
     except requests.exceptions.HTTPError as http_err:
         print(f'HTTP error while fetching review time for PR #{pr_number}: {http_err}')
     except requests.exceptions.RequestException as req_err:
@@ -169,7 +171,7 @@ def get_command_line_args():
         description=(
             'Analyze GitHub PR comments within a specified date range.\n\n'
             'Example usage:\n'
-            '  python pr_comment_stats.py --repo https://github.com/owner/repo --token YOUR_GITHUB_PAT --start-date 2024-01-01 --end-date 2024-01-31\n'
+            '  python pr_comment_stats.py --repo https://github.com/owner/repo --token YOUR_GITHUB_PAT --gemini-api-key GEMINI_API_KEY --start-date 2024-01-01 --end-date 2024-01-31\n'
         ),
         formatter_class=argparse.RawTextHelpFormatter
     )
@@ -177,7 +179,35 @@ def get_command_line_args():
     parser.add_argument('--token', required=True, help='GitHub personal access token (PAT)')
     parser.add_argument('--start-date', required=True, help='Start date in YYYY-MM-DD format (e.g. 2024-01-01)')
     parser.add_argument('--end-date', required=True, help='End date in YYYY-MM-DD format (e.g. 2024-01-31)')
+    parser.add_argument('--gemini-api-key', required=True,
+                        help='Gemini API key (e.g. https://aistudio.google.com/api-keys)')
     return parser.parse_args()
+
+
+def generate_ai_insights_on_comments_data(api_key, comments_data):
+    """Generate AI Insights data from comments data."""
+    prompt = (
+        'Generate four one-line insights about code-review comments.\n'
+        'STRICT OUTPUT (exactly 4 lines, • bullets, no extra text):\n'
+        '1) Observations: <≤20 words> i.e Summarize patterns (e.g., “High style violations in new module,” “Long waits for PRs on Fridays”).\n'
+        '2) Action Taken: <≤20 words; if unknown, write \'No clear signal\'> i.e We introduced a pre-commit hook for linting, reducing style issues by 15% in last 2 weeks.\n'
+        '3) Next Steps: <≤20 words; concrete/measurable> i.e We’ll set a 24-hour review SLA,” “We’ll do a code review knowledge-sharing session next sprint.\n'
+        '4) Additional Comments: <≤20 words; links/holidays/unusual context or \'None\'> Link or attach a short table with PR data, any unusual circumstances (holidays, new hires, etc.).\n'
+        'Rules: Be concise, specific, and do not hallucinate. Base only on provided data.\n'
+    )
+
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[prompt, comments_data],
+        )
+
+        return (response.text or '').strip()
+    except ValueError:
+        print('Could not generate insights for comments data.')
+    except ClientError:
+        print('API key not valid. Please pass a valid API key')
 
 
 def write_results_to_file(repo, start_date, end_date, comments_data):
@@ -195,12 +225,15 @@ def write_results_to_file(repo, start_date, end_date, comments_data):
         json.dump(comments_to_save, f, indent=2)
     print(f'\nSaved PR comments to {output_file_name}')
 
+
 def main():
     args = get_command_line_args()
     owner, repo = extract_repo_info(args.repo)
 
     start_date = parse_date(args.start_date)
     end_date = parse_date(args.end_date)
+
+    gemini_api_key = args.gemini_api_key
 
     if start_date > end_date:
         print('Error: Start date must be before or equal to end date.')
@@ -210,7 +243,7 @@ def main():
     if not pull_requests:
         print(f'No PRs found between {start_date.date()} and {end_date.date()}.')
         return
-    
+
     with ThreadPoolExecutor(max_workers=10) as executor:
         comment_workers = [
             executor.submit(get_review_comment_count, owner, repo, pr['number'], args.token)
@@ -222,7 +255,7 @@ def main():
         ]
         comment_results = [worker.result() for worker in comment_workers]
         review_times = [worker.result() for worker in review_time_workers]
-    
+
     comment_counts = [result['comment_count'] for result in comment_results]
     all_comments_data = [result for result in comment_results if result['comments']]
     prs_with_activity = []
@@ -232,13 +265,11 @@ def main():
     for i, pr in enumerate(pull_requests):
         has_comments = comment_counts[i] > 0
         has_reviews = review_times[i] is not None
-        
+
         if has_comments or has_reviews:
             prs_with_activity.append(pr)
             activity_comment_counts.append(comment_counts[i])
             activity_review_times.append(review_times[i])
-    comment_stats = ""
-    review_stats = ""
 
     if activity_comment_counts:
         avg_comments = sum(activity_comment_counts) / len(activity_comment_counts)
@@ -256,14 +287,22 @@ def main():
         review_stats = f'• Avg review time: {avg_review_time:.1f} business hours (excluding weekends)'
     else:
         review_stats = '• Avg review time: No reviews found on any PRs'
-    
+
+    ai_insights = generate_ai_insights_on_comments_data(gemini_api_key, str(all_comments_data))
+
     write_results_to_file(repo, start_date, end_date, all_comments_data)
     print(
         f'PR Comment Stats for {start_date.date()} to {end_date.date()}:\n'
         f'• PRs with activity: {len(prs_with_activity)}\n'
         f'{comment_stats}\n'
-        f'{review_stats}'
+        f'{review_stats}\n'
     )
+
+    if ai_insights:
+        print(
+            f'PR Comment Insights for {start_date.date()} to {end_date.date()}:\n'
+            f'{ai_insights}'
+        )
 
 
 if __name__ == '__main__':
